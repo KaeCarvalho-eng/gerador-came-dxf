@@ -23,9 +23,14 @@ def calcular_deslocamento_trecho(u, lei):
 
 
 def gerar_perfil_came(raio_base, trechos, lei_selecionada, n_pontos=720):
+    """
+    trechos: lista de tuplas (theta_ini_deg, theta_fim_deg, tipo, H_mm)
+    tipo: 'subida', 'descida' ou 'parada'
+    """
     theta_deg = np.linspace(0.0, 360.0, n_pontos, endpoint=True)
     s = np.zeros_like(theta_deg)
     s_acumulado = 0.0
+    s_final_esperado = 0.0
 
     for idx, (t_ini, t_fim, tipo, H) in enumerate(trechos):
         if t_fim <= t_ini:
@@ -41,14 +46,16 @@ def gerar_perfil_came(raio_base, trechos, lei_selecionada, n_pontos=720):
         if tipo == "subida":
             s[mask] = s_acumulado + H * calcular_deslocamento_trecho(u, lei_selecionada)
             s_acumulado += H
+            s_final_esperado += H
         elif tipo == "descida":
             s[mask] = s_acumulado - H * calcular_deslocamento_trecho(u, lei_selecionada)
             s_acumulado -= H
-        else:
+            s_final_esperado -= H
+        else:  # parada
             s[mask] = np.full(np.sum(mask), s_acumulado)
 
     raio_mm = raio_base + s
-    return theta_deg, s, raio_mm
+    return theta_deg, s, raio_mm, s_final_esperado
 
 
 def gerar_dxf(theta_deg, raio_mm, raio_base, raio_furo=0.0):
@@ -91,29 +98,112 @@ lei_selecionada = st.sidebar.selectbox(
 )
 n_pontos = st.sidebar.slider("Resolução angular (pontos em 360°)", min_value=180, max_value=2000, value=720, step=60)
 
-st.subheader("Configuração dos Trechos (0° a 360°)")
-col1, col2 = st.columns(2)
+st.subheader("Quantidade e Configuração dos Trechos (0° a 360°)")
+num_trechos = st.number_input(
+    "Quantidade de trechos",
+    min_value=1,
+    max_value=12,
+    value=3,
+    step=1,
+)
 
-with col1:
-    st.markdown("**Trecho 1 — Subida**")
-    t1_fim = st.number_input("Ângulo final da subida [°]", min_value=10.0, max_value=350.0, value=255.0, step=5.0)
-    H_subida = st.number_input("Elevação H [mm]", min_value=1.0, max_value=250.0, value=83.0, step=1.0)
+encadear_angulos = st.checkbox(
+    "Encadear automaticamente o ângulo inicial ao ângulo final do trecho anterior",
+    value=True,
+)
 
-with col2:
-    st.markdown("**Trecho 2 — Retorno até 360°**")
-    st.text_input("Ângulo inicial do retorno [°]", value=f"{t1_fim:.1f}", disabled=True)
-    st.text_input("Ângulo final do retorno [°]", value="360.0", disabled=True)
-    H_descida = st.number_input("Descida de retorno [mm]", min_value=1.0, max_value=250.0, value=83.0, step=1.0)
-
-if not np.isclose(H_subida, H_descida, atol=1e-6):
-    st.warning("Para o came fechar em s = 0 ao completar 360°, mantenha Elevação = Descida (ou ajuste conforme seu projeto).")
-
-trechos = [
-    (0.0, t1_fim, "subida", H_subida),
-    (t1_fim, 360.0, "descida", H_descida),
+# Valores padrão amigáveis para os primeiros trechos
+padroes = [
+    (0.0, 120.0, "subida", 30.0),
+    (120.0, 210.0, "parada", 0.0),
+    (210.0, 360.0, "descida", 30.0),
 ]
 
-theta_deg, s, raio_mm = gerar_perfil_came(raio_base, trechos, lei_selecionada, n_pontos=n_pontos)
+trechos = []
+angulo_sugerido_ini = 0.0
+
+for i in range(int(num_trechos)):
+    padrao_ini, padrao_fim, padrao_tipo, padrao_H = (
+        padroes[i] if i < len(padroes) else (min(angulo_sugerido_ini, 350.0), 360.0, "parada", 0.0)
+    )
+    valor_ini = angulo_sugerido_ini if encadear_angulos else padrao_ini
+    valor_fim = 360.0 if (encadear_angulos and i == int(num_trechos) - 1) else max(padrao_fim, min(valor_ini + 10.0, 360.0))
+
+    with st.expander(f"Trecho {i + 1}", expanded=True):
+        c1, c2, c3, c4 = st.columns([1.2, 1.2, 1.4, 1.2])
+
+        with c1:
+            t_ini = st.number_input(
+                "Ângulo inicial [°]",
+                min_value=0.0,
+                max_value=360.0,
+                value=float(np.clip(valor_ini, 0.0, 360.0)),
+                step=5.0,
+                key=f"t_ini_{i}",
+                disabled=encadear_angulos and i > 0,
+            )
+
+        with c2:
+            t_fim = st.number_input(
+                "Ângulo final [°]",
+                min_value=0.0,
+                max_value=360.0,
+                value=float(np.clip(valor_fim, 0.0, 360.0)),
+                step=5.0,
+                key=f"t_fim_{i}",
+            )
+
+        with c3:
+            tipo = st.selectbox(
+                "Tipo de movimento",
+                options=["subida", "descida", "parada"],
+                index=["subida", "descida", "parada"].index(padrao_tipo),
+                format_func=lambda t: {
+                    "subida": "Subida",
+                    "descida": "Descida",
+                    "parada": "Parada (Dwell)",
+                }[t],
+                key=f"tipo_{i}",
+            )
+
+        with c4:
+            if tipo == "parada":
+                st.text_input("Deslocamento H [mm]", value="0.0", disabled=True, key=f"H_parada_{i}")
+                H = 0.0
+            else:
+                H = st.number_input(
+                    "Deslocamento H [mm]",
+                    min_value=0.0,
+                    max_value=300.0,
+                    value=float(padrao_H if padrao_H > 0 else 20.0),
+                    step=1.0,
+                    key=f"H_{i}",
+                )
+
+        if t_fim <= t_ini:
+            st.error(f"No Trecho {i + 1}, o ângulo final ({t_fim:.1f}°) deve ser maior que o ângulo inicial ({t_ini:.1f}°).")
+
+        trechos.append((float(t_ini), float(t_fim), tipo, float(H)))
+        angulo_sugerido_ini = float(t_fim)
+
+if trechos:
+    primeiro_ini = trechos[0][0]
+    ultimo_fim = trechos[-1][1]
+    if not np.isclose(primeiro_ini, 0.0, atol=1e-6) or not np.isclose(ultimo_fim, 360.0, atol=1e-6):
+        st.info(
+            f"Intervalo coberto pelos trechos: **{primeiro_ini:.1f}°** até **{ultimo_fim:.1f}°**. "
+            "Para uma volta completa do came, recomenda-se iniciar em **0.0°** e terminar em **360.0°**."
+        )
+
+theta_deg, s, raio_mm, s_final_esperado = gerar_perfil_came(
+    raio_base, trechos, lei_selecionada, n_pontos=n_pontos
+)
+
+if not np.isclose(s_final_esperado, 0.0, atol=1e-6):
+    st.warning(
+        f"A soma algébrica dos deslocamentos nos trechos resulta em **{s_final_esperado:+.2f} mm** ao final do ciclo "
+        "(subidas somam +H e descidas subtraem -H). Para fechar em s = 0 mm, equilibre subida e descida."
+    )
 
 col_graf, col_info = st.columns([2, 1])
 
