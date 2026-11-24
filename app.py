@@ -1,4 +1,6 @@
 import io
+import re
+
 import ezdxf
 import matplotlib.pyplot as plt
 import numpy as np
@@ -59,13 +61,12 @@ def gerar_perfil_came(raio_base, trechos, lei_selecionada, n_pontos=720):
 
 
 def gerar_dxf(theta_deg, raio_mm, raio_base, raio_furo=0.0):
-    theta_rad = np.deg2rad(theta_deg)
-    x = raio_mm * np.cos(theta_rad)
-    y = raio_mm * np.sin(theta_rad)
+    # Descarta o ponto de 360°, que coincide com o de 0° (close=True fecha a curva)
+    theta_rad = np.deg2rad(theta_deg[:-1])
+    x = raio_mm[:-1] * np.cos(theta_rad)
+    y = raio_mm[:-1] * np.sin(theta_rad)
 
     pontos = [(float(px), float(py)) for px, py in zip(x, y)]
-    if pontos and pontos[0] != pontos[-1]:
-        pontos.append(pontos[0])
 
     doc = ezdxf.new(setup=True)
     doc.header["$INSUNITS"] = 4  # Milímetros
@@ -119,15 +120,48 @@ padroes = [
     (210.0, 360.0, "descida", 30.0),
 ]
 
-trechos = []
-angulo_sugerido_ini = 0.0
+N = int(num_trechos)
 
-for i in range(int(num_trechos)):
-    padrao_ini, padrao_fim, padrao_tipo, padrao_H = (
-        padroes[i] if i < len(padroes) else (min(angulo_sugerido_ini, 350.0), 360.0, "parada", 0.0)
-    )
-    valor_ini = angulo_sugerido_ini if encadear_angulos else padrao_ini
-    valor_fim = 360.0 if (encadear_angulos and i == int(num_trechos) - 1) else max(padrao_fim, min(valor_ini + 10.0, 360.0))
+# --- Remove o estado dos trechos que não existem mais (evita valores velhos ao aumentar de novo) ---
+_padrao_chave = re.compile(r"^(t_ini|t_fim|tipo|H|H_parada)_(\d+)$")
+for k in list(st.session_state.keys()):
+    m = _padrao_chave.match(k)
+    if m and int(m.group(2)) >= N:
+        del st.session_state[k]
+
+# --- Pré-passo: inicializa o estado dos trechos novos ANTES de criar os widgets ---
+for i in range(N):
+    k_ini, k_fim = f"t_ini_{i}", f"t_fim_{i}"
+    if k_ini in st.session_state and k_fim in st.session_state:
+        continue
+
+    if i < len(padroes):
+        st.session_state[k_ini] = padroes[i][0]
+        st.session_state[k_fim] = padroes[i][1]
+    else:
+        # Novo trecho: divide o trecho anterior ao meio para abrir espaço
+        prev_ini = st.session_state[f"t_ini_{i - 1}"]
+        prev_fim = st.session_state[f"t_fim_{i - 1}"]
+        meio = round(((prev_ini + prev_fim) / 2.0) / 5.0) * 5.0
+        meio = float(min(max(meio, prev_ini + 5.0), prev_fim - 5.0)) if prev_fim - prev_ini > 10.0 else float(prev_ini)
+        st.session_state[f"t_fim_{i - 1}"] = meio
+        st.session_state[k_ini] = meio
+        st.session_state[k_fim] = float(prev_fim)
+
+trechos = []
+angulo_anterior_fim = 0.0
+
+for i in range(N):
+    k_ini, k_fim = f"t_ini_{i}", f"t_fim_{i}"
+    _, _, padrao_tipo, padrao_H = padroes[i] if i < len(padroes) else (0.0, 0.0, "parada", 0.0)
+
+    eh_ultimo = i == N - 1
+
+    # Força o encadeamento (precisa ser feito antes de instanciar o widget)
+    if encadear_angulos:
+        st.session_state[k_ini] = 0.0 if i == 0 else float(angulo_anterior_fim)
+        if eh_ultimo:
+            st.session_state[k_fim] = 360.0
 
     with st.expander(f"Trecho {i + 1}", expanded=True):
         c1, c2, c3, c4 = st.columns([1.2, 1.2, 1.4, 1.2])
@@ -137,10 +171,9 @@ for i in range(int(num_trechos)):
                 "Ângulo inicial [°]",
                 min_value=0.0,
                 max_value=360.0,
-                value=float(np.clip(valor_ini, 0.0, 360.0)),
                 step=5.0,
-                key=f"t_ini_{i}",
-                disabled=encadear_angulos and i > 0,
+                key=k_ini,
+                disabled=encadear_angulos,
             )
 
         with c2:
@@ -148,9 +181,9 @@ for i in range(int(num_trechos)):
                 "Ângulo final [°]",
                 min_value=0.0,
                 max_value=360.0,
-                value=float(np.clip(valor_fim, 0.0, 360.0)),
                 step=5.0,
-                key=f"t_fim_{i}",
+                key=k_fim,
+                disabled=encadear_angulos and eh_ultimo,
             )
 
         with c3:
@@ -184,7 +217,7 @@ for i in range(int(num_trechos)):
             st.error(f"No Trecho {i + 1}, o ângulo final ({t_fim:.1f}°) deve ser maior que o ângulo inicial ({t_ini:.1f}°).")
 
         trechos.append((float(t_ini), float(t_fim), tipo, float(H)))
-        angulo_sugerido_ini = float(t_fim)
+        angulo_anterior_fim = float(t_fim)
 
 if trechos:
     primeiro_ini = trechos[0][0]
